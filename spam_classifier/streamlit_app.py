@@ -5,6 +5,7 @@ Run:
 from __future__ import annotations
 import os
 from typing import Optional, List
+from collections import Counter
 
 import pandas as pd
 import joblib
@@ -13,7 +14,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from io import BytesIO
 from wordcloud import WordCloud
-from sklearn.metrics import confusion_matrix, roc_curve, auc
+from sklearn.metrics import confusion_matrix, roc_curve, auc, accuracy_score, precision_recall_fscore_support
 
 # 與訓練腳本輸出一致：模型位於專案根目錄下 models/spam_model.joblib
 MODEL_PATH = os.path.join("models", "spam_model.joblib")
@@ -51,8 +52,16 @@ with st.sidebar:
     st.header("設定")
     show_prob = st.checkbox("顯示所有類別機率", True)
     batch_limit = st.number_input("批次預測顯示筆數上限", min_value=5, max_value=200, value=50, step=5)
+    st.markdown("---")
+    st.subheader("令牌模式")
+    token_scope = st.selectbox("資料範圍", ["全部", "ham", "spam"], index=0)
+    token_ngram = st.slider("n-gram 長度", min_value=1, max_value=2, value=1, step=1)
+    token_topk = st.slider("顯示前 N 個常見令牌", min_value=10, max_value=100, value=30, step=10)
     top_n_terms = st.slider("Top 權重詞顯示數量", min_value=5, max_value=50, value=20, step=5)
     show_wordcloud = st.checkbox("顯示詞雲 (WordCloud)", True)
+    st.markdown("---")
+    st.subheader("模型效能")
+    spam_threshold = st.slider("Spam 判定閾值", min_value=0.10, max_value=0.90, value=0.50, step=0.05)
     st.markdown("---")
     st.markdown("**模型路徑**: ``{}``".format(MODEL_PATH))
 
@@ -126,115 +135,153 @@ if dataset is not None:
     with st.expander("原始資料前 10 筆"):
         st.dataframe(dataset.head(10))
 
-    col_a, col_b, col_c = st.columns(3)
-    # 標籤分佈
-    label_counts = dataset["label"].value_counts()
-    col_a.metric("總筆數", f"{len(dataset):,}")
-    col_a.write(label_counts)
-    # 長度直方圖
-    fig_len, ax_len = plt.subplots(figsize=(4,3))
-    ax_len.hist(dataset["length"], bins=40, color="#4e79a7", alpha=0.85)
-    ax_len.set_title("訊息長度直方圖")
-    ax_len.set_xlabel("字元數")
-    ax_len.set_ylabel("頻率")
-    col_b.pyplot(fig_len, clear_figure=True)
+    st.markdown("---")
 
-    # 訊息長度分佈
-    dataset["length"] = dataset["text"].str.len()
-    col_b.caption("訊息長度分佈 (部分統計)")
-    col_b.write(dataset["length"].describe())
+    # 儀表板分頁
+    tabs = st.tabs(["資料分佈", "令牌模式", "模型效能"])
 
-    # Top TF-IDF 詞彙（簡易：擷取模型向量器特徵 + spam 類別對應的 LogisticRegression 權重）
-    try:
-        if hasattr(model, "named_steps") and "tfidf" in model.named_steps and "clf" in model.named_steps:
-            vect = model.named_steps["tfidf"]
-            clf = model.named_steps["clf"]
-            feature_names: List[str] = list(vect.get_feature_names_out())
-            if len(clf.classes_) == 2:
-                spam_index = list(clf.classes_).index("spam")
-                # Binary logistic regression coef_ shape could be (1, n_features)
-                if clf.coef_.shape[0] == 1:
-                    weights_spam = clf.coef_[0]
-                    weights_ham = -clf.coef_[0]  # approximate opposite
+    # 資料分佈
+    with tabs[0]:
+        st.subheader("資料分佈")
+        if dataset is not None:
+            with st.expander("原始資料前 10 筆"):
+                st.dataframe(dataset.head(10))
+
+            col_a, col_b = st.columns([1,2])
+            label_counts = dataset["label"].value_counts()
+            col_a.metric("總筆數", f"{len(dataset):,}")
+            col_a.write(label_counts)
+
+            dataset["length"] = dataset["text"].str.len()
+            fig_len, ax_len = plt.subplots(figsize=(6,3))
+            ax_len.hist(dataset["length"], bins=40, color="#4e79a7", alpha=0.7, label="All")
+            # 類別對比直方圖
+            try:
+                ax_len.hist(dataset.loc[dataset.label.str.lower()=="ham","length"], bins=40, alpha=0.5, label="ham")
+                ax_len.hist(dataset.loc[dataset.label.str.lower()=="spam","length"], bins=40, alpha=0.5, label="spam")
+                ax_len.legend()
+            except Exception:
+                pass
+            ax_len.set_title("訊息長度直方圖")
+            ax_len.set_xlabel("字元數")
+            ax_len.set_ylabel("頻率")
+            col_b.pyplot(fig_len, clear_figure=True)
+        else:
+            st.info("資料檔缺失，僅能使用預測功能。")
+
+    # 令牌模式
+    with tabs[1]:
+        st.subheader("令牌模式（依資料與向量器）")
+        try:
+            if dataset is not None and hasattr(model, "named_steps") and "tfidf" in model.named_steps:
+                vect = model.named_steps["tfidf"]
+                analyzer = vect.build_analyzer()
+                # 篩選資料範圍
+                if token_scope == "ham":
+                    texts = dataset.loc[dataset.label.str.lower()=="ham","text"].astype(str).tolist()
+                elif token_scope == "spam":
+                    texts = dataset.loc[dataset.label.str.lower()=="spam","text"].astype(str).tolist()
                 else:
-                    weights_spam = clf.coef_[spam_index]
-                    ham_index = 1 - spam_index
-                    weights_ham = clf.coef_[ham_index]
-                # Top spam
-                spam_top_idx = np.argsort(weights_spam)[::-1][:top_n_terms]
-                ham_top_idx = np.argsort(weights_ham)[::-1][:top_n_terms]
-                df_spam_top = pd.DataFrame([(feature_names[i], float(weights_spam[i])) for i in spam_top_idx], columns=["term","weight"]) 
-                df_ham_top = pd.DataFrame([(feature_names[i], float(weights_ham[i])) for i in ham_top_idx], columns=["term","weight"]) 
-                st.markdown("### 類別關鍵詞 Top 排行")
-                col_spam, col_ham = st.columns(2)
-                col_spam.caption("Spam Top 詞彙")
-                col_spam.table(df_spam_top)
-                col_ham.caption("Ham Top 詞彙")
-                col_ham.table(df_ham_top)
-                # 詞雲
-                if show_wordcloud:
-                    st.markdown("### 詞雲視覺化")
-                    spam_text = " ".join(dataset[dataset.label.str.lower()=="spam"]["text"].tolist())
-                    ham_text = " ".join(dataset[dataset.label.str.lower()=="ham"]["text"].tolist())
-                    wc_spam = WordCloud(width=600, height=400, background_color="white").generate(spam_text)
-                    wc_ham = WordCloud(width=600, height=400, background_color="white").generate(ham_text)
-                    col_w1, col_w2 = st.columns(2)
-                    col_w1.image(wc_spam.to_array(), caption="Spam 詞雲", use_column_width=True)
-                    col_w2.image(wc_ham.to_array(), caption="Ham 詞雲", use_column_width=True)
-    except Exception as e:
-        st.info(f"無法計算詞彙排行榜/詞雲: {e}")
+                    texts = dataset["text"].astype(str).tolist()
+                counter = Counter()
+                for t in texts:
+                    toks = analyzer(t)
+                    # 篩選 n-gram 長度
+                    for tok in toks:
+                        if (tok.count(" ")+1) == token_ngram:
+                            counter[tok] += 1
+                common = counter.most_common(token_topk)
+                df_tok = pd.DataFrame(common, columns=["token", "count"])
+                st.caption(f"Top {token_topk} 令牌（n={token_ngram}, 範圍={token_scope}）")
+                st.table(df_tok)
+                # 可選：點選一個 token 顯示範例句
+                if len(df_tok):
+                    picked = st.selectbox("查看包含此令牌的範例句：", ["(不選)"] + df_tok["token"].head(20).tolist())
+                    if picked and picked != "(不選)":
+                        examples = [s for s in texts if picked in s][:5]
+                        for ex in examples:
+                            st.write("• ", ex)
+            else:
+                st.info("缺少資料或向量器，無法顯示令牌模式。")
+        except Exception as e:
+            st.info(f"令牌模式計算失敗：{e}")
 
-    # 混淆矩陣 & ROC
-    st.markdown("### 評估 (整份資料集重跑推論)")
-    try:
-        y_true = dataset["label"].astype(str)
-        y_pred_full = model.predict(dataset["text"].astype(str))
-        cm = confusion_matrix(y_true, y_pred_full, labels=["ham","spam"])
-        fig_cm, ax_cm = plt.subplots(figsize=(4,3))
-        im = ax_cm.imshow(cm, cmap="Blues")
-        ax_cm.set_xticks([0,1]); ax_cm.set_xticklabels(["ham","spam"])
-        ax_cm.set_yticks([0,1]); ax_cm.set_yticklabels(["ham","spam"])
-        ax_cm.set_xlabel("Predicted"); ax_cm.set_ylabel("Actual")
-        for (i,j), v in np.ndenumerate(cm):
-            ax_cm.text(j, i, str(v), ha="center", va="center", color="black")
-        ax_cm.set_title("Confusion Matrix")
-        st.pyplot(fig_cm, clear_figure=True)
+    # 模型效能
+    with tabs[2]:
+        st.subheader("模型效能（整份資料集重跑推論）")
+        try:
+            if dataset is not None:
+                y_true = dataset["label"].astype(str)
+                # 使用機率 + 閾值產生預測
+                if hasattr(model, "predict_proba"):
+                    proba_full = model.predict_proba(dataset["text"].astype(str))
+                    classes = list(model.classes_)
+                    if "spam" in classes:
+                        spam_index = classes.index("spam")
+                        spam_scores = proba_full[:, spam_index]
+                        y_pred_thr = np.where(spam_scores >= spam_threshold, "spam", "ham")
+                    else:
+                        # 後備：直接使用 predict
+                        y_pred_thr = model.predict(dataset["text"].astype(str))
+                        spam_scores = None
+                else:
+                    y_pred_thr = model.predict(dataset["text"].astype(str))
+                    spam_scores = None
 
-        # ROC (spam as positive)
-        if hasattr(model, "predict_proba"):
-            proba_full = model.predict_proba(dataset["text"].astype(str))
-            classes = list(model.classes_)
-            if "spam" in classes:
-                spam_index = classes.index("spam")
-                spam_scores = proba_full[:, spam_index]
-                y_bin = (y_true.str.lower()=="spam").astype(int)
-                fpr, tpr, _ = roc_curve(y_bin, spam_scores)
-                roc_auc = auc(fpr, tpr)
-                fig_roc, ax_roc = plt.subplots(figsize=(4,3))
-                ax_roc.plot(fpr, tpr, label=f"ROC AUC={roc_auc:.3f}")
-                ax_roc.plot([0,1],[0,1], linestyle="--", color="gray")
-                ax_roc.set_xlabel("FPR")
-                ax_roc.set_ylabel("TPR")
-                ax_roc.set_title("ROC Curve (spam as positive)")
-                ax_roc.legend(loc="lower right")
-                st.pyplot(fig_roc, clear_figure=True)
-    except Exception as e:
-        st.info(f"評估計算失敗: {e}")
+                # 指標
+                acc = accuracy_score(y_true, y_pred_thr)
+                prec, rec, f1, _ = precision_recall_fscore_support(y_true, y_pred_thr, labels=["ham","spam"], average=None)
+                col_m1, col_m2, col_m3 = st.columns(3)
+                col_m1.metric("Accuracy", f"{acc:.4f}")
+                # 顯示 spam 這一類的 P/R/F1
+                try:
+                    spam_idx = ["ham","spam"].index("spam")
+                    col_m2.metric("Precision (spam)", f"{prec[spam_idx]:.4f}")
+                    col_m3.metric("Recall (spam)", f"{rec[spam_idx]:.4f}")
+                    st.caption(f"F1 (spam) = {f1[spam_idx]:.4f}")
+                except Exception:
+                    pass
 
-    # 下載整體預測結果
-    try:
-        st.markdown("### 匯出預測結果")
-        full_df = dataset.copy()
-        full_df["pred"] = y_pred_full
-        if "spam_scores" in locals():
-            full_df["spam_prob"] = spam_scores
-        csv_bytes = full_df.to_csv(index=False).encode("utf-8-sig")
-        st.download_button("下載完整預測結果 CSV", data=csv_bytes, file_name="spam_predictions.csv", mime="text/csv")
-    except Exception as e:
-        st.info(f"無法產生下載：{e}")
-else:
-    st.info("資料檔缺失，僅能使用預測功能。")
+                # 混淆矩陣
+                cm = confusion_matrix(y_true, y_pred_thr, labels=["ham","spam"])
+                fig_cm, ax_cm = plt.subplots(figsize=(4,3))
+                im = ax_cm.imshow(cm, cmap="Blues")
+                ax_cm.set_xticks([0,1]); ax_cm.set_xticklabels(["ham","spam"])
+                ax_cm.set_yticks([0,1]); ax_cm.set_yticklabels(["ham","spam"])
+                ax_cm.set_xlabel("Predicted"); ax_cm.set_ylabel("Actual")
+                for (i,j), v in np.ndenumerate(cm):
+                    ax_cm.text(j, i, str(v), ha="center", va="center", color="black")
+                ax_cm.set_title(f"Confusion Matrix (thresh={spam_threshold:.2f})")
+                st.pyplot(fig_cm, clear_figure=True)
 
+                # ROC（與閾值無關）
+                if spam_scores is not None:
+                    y_bin = (y_true.str.lower()=="spam").astype(int)
+                    fpr, tpr, _ = roc_curve(y_bin, spam_scores)
+                    roc_auc = auc(fpr, tpr)
+                    fig_roc, ax_roc = plt.subplots(figsize=(4,3))
+                    ax_roc.plot(fpr, tpr, label=f"ROC AUC={roc_auc:.3f}")
+                    ax_roc.plot([0,1],[0,1], linestyle="--", color="gray")
+                    ax_roc.set_xlabel("FPR")
+                    ax_roc.set_ylabel("TPR")
+                    ax_roc.set_title("ROC Curve (spam as positive)")
+                    ax_roc.legend(loc="lower right")
+                    st.pyplot(fig_roc, clear_figure=True)
+
+                # 匯出
+                st.markdown("### 匯出預測結果")
+                full_df = dataset.copy()
+                full_df["pred"] = y_pred_thr
+                if spam_scores is not None:
+                    full_df["spam_prob"] = spam_scores
+                csv_bytes = full_df.to_csv(index=False).encode("utf-8-sig")
+                st.download_button("下載完整預測結果 CSV", data=csv_bytes, file_name="spam_predictions.csv", mime="text/csv")
+            else:
+                st.info("資料檔缺失，無法計算效能。")
+        except Exception as e:
+            st.info(f"效能計算失敗：{e}")
+
+# 說明區塊
 st.markdown("---")
 with st.expander("說明 / Help"):
     st.markdown(
@@ -243,6 +290,7 @@ with st.expander("說明 / Help"):
         - 單筆輸入區輸入訊息後按下『預測』。
         - 批次上傳支援 CSV，前兩欄視為 label 與 text；label 可為空用於推論。
         - 若尚未訓練模型，請先在專案根目錄執行：`python .\\spam_classifier\\train.py`。
+
         **改進建議**
         - 可增加資料清理（URL、表情符號正規化）。
         - 可替換模型為 SVC、Naive Bayes 或深度學習。
