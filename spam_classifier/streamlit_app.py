@@ -15,6 +15,7 @@ import matplotlib.pyplot as plt
 from io import BytesIO
 from wordcloud import WordCloud
 from sklearn.metrics import confusion_matrix, roc_curve, auc, accuracy_score, precision_recall_fscore_support
+from sklearn.neighbors import KernelDensity
 
 # 與訓練腳本輸出一致：模型位於專案根目錄下 models/spam_model.joblib
 MODEL_PATH = os.path.join("models", "spam_model.joblib")
@@ -201,6 +202,51 @@ if dataset is not None:
                 with st.expander("Preview (head 10)"):
                     st.dataframe(dataset.head(10))
 
+                # Label distribution charts
+                try:
+                    fig_lbl, ax_lbl = plt.subplots(figsize=(3.8,3))
+                    ax_lbl.bar(lbl_counts.index.astype(str), lbl_counts.values, color=["#5cb85c" if str(x).lower()=="ham" else "#d9534f" for x in lbl_counts.index])
+                    ax_lbl.set_title("Label Count Bar")
+                    ax_lbl.set_ylabel("Count")
+                    st.pyplot(fig_lbl, clear_figure=True)
+                except Exception:
+                    pass
+
+                try:
+                    fig_pie, ax_pie = plt.subplots(figsize=(3.8,3))
+                    ax_pie.pie(lbl_counts.values, labels=lbl_counts.index, autopct="%1.1f%%", colors=["#5cb85c","#d9534f"])
+                    ax_pie.set_title("Label Proportion")
+                    st.pyplot(fig_pie, clear_figure=True)
+                except Exception:
+                    pass
+
+                # Word count stats
+                dataset["__word_count__"] = dataset["text"].str.split().str.len()
+                wc = dataset["__word_count__"]
+                st.markdown("**Word Count Stats**")
+                st.caption(f"Avg words: {wc.mean():.1f} | Median: {wc.median():.1f} | Max: {wc.max()} | Min: {wc.min()}")
+                try:
+                    fig_wc_hist, ax_wc_hist = plt.subplots(figsize=(3.8,3))
+                    ax_wc_hist.hist(wc, bins=40, color="#4e79a7", alpha=0.75)
+                    ax_wc_hist.set_title("Word Count Histogram")
+                    ax_wc_hist.set_xlabel("Words")
+                    ax_wc_hist.set_ylabel("Frequency")
+                    st.pyplot(fig_wc_hist, clear_figure=True)
+                except Exception:
+                    pass
+
+                # Length boxplot per label
+                try:
+                    fig_box, ax_box = plt.subplots(figsize=(3.8,3))
+                    data_box = [dataset.loc[dataset.label.str.lower()=="ham","text"].str.len(),
+                                dataset.loc[dataset.label.str.lower()=="spam","text"].str.len()]
+                    ax_box.boxplot(data_box, labels=["ham","spam"], patch_artist=True)
+                    ax_box.set_title("Length Boxplot (ham vs spam)")
+                    ax_box.set_ylabel("Characters")
+                    st.pyplot(fig_box, clear_figure=True)
+                except Exception:
+                    pass
+
             # Length distribution
             dataset["__length__"] = dataset["text"].str.len()
             fig_len, ax_len = plt.subplots(figsize=(7,3))
@@ -214,6 +260,28 @@ if dataset is not None:
             ax_len.set_title("Message Length Histogram")
             ax_len.set_xlabel("Characters")
             ax_len.set_ylabel("Frequency")
+            # KDE curve (All)
+            try:
+                lengths_vals = dataset["__length__"].astype(float).values
+                if len(lengths_vals) > 1 and np.std(lengths_vals) > 0:
+                    n = len(lengths_vals)
+                    std = np.std(lengths_vals)
+                    # Silverman's rule of thumb for bandwidth; ensure >= 1.0 to avoid overfitting for short texts
+                    bw = max(1.0, 1.06 * std * (n ** (-1/5)))
+                    kde = KernelDensity(kernel="gaussian", bandwidth=bw).fit(lengths_vals.reshape(-1,1))
+                    x_grid = np.linspace(lengths_vals.min(), lengths_vals.max(), 200).reshape(-1,1)
+                    log_dens = kde.score_samples(x_grid)
+                    dens = np.exp(log_dens)
+                    # Scale density to histogram count scale: density * n * bin_width
+                    data_min, data_max = lengths_vals.min(), lengths_vals.max()
+                    bin_width = (data_max - data_min) / 40 if data_max > data_min else 1.0
+                    scaled = dens * n * bin_width
+                    ax2 = ax_len.twinx()
+                    ax2.plot(x_grid[:,0], scaled, color="#f28e2b", label="KDE (All)")
+                    ax2.set_ylabel("Density (scaled)")
+                    ax2.legend(loc="upper right")
+            except Exception:
+                pass
             col_len.pyplot(fig_len, clear_figure=True)
 
     # Top Tokens by Class
