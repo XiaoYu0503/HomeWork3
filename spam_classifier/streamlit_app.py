@@ -37,41 +37,77 @@ def load_dataset(path: str) -> Optional[pd.DataFrame]:
     return df
 
 st.set_page_config(page_title="SMS Spam Classifier", page_icon="📨", layout="wide")
-st.title("📨 SMS 垃圾簡訊分類器 Demo")
+st.title("📨 SMS Spam Classifier Demo")
 
 model = load_model()
 if model is None:
-    st.error("模型尚未建立，請先在根目錄執行: python .\\spam_classifier\\train.py")
+    st.error("Model not found. Please run: python .\\spam_classifier\\train.py in project root.")
     st.stop()
-
-dataset = load_dataset(DATA_FILE)
-if dataset is None:
-    st.warning("找不到資料檔 sms_spam_no_header.csv，資料視覺化功能將停用。")
+dataset: Optional[pd.DataFrame] = None
+default_dataset = load_dataset(DATA_FILE)
+if default_dataset is None:
+    st.warning("Default dataset sms_spam_no_header.csv not found. You may upload one manually for visualization.")
 
 with st.sidebar:
-    st.header("設定")
-    show_prob = st.checkbox("顯示所有類別機率", True)
-    batch_limit = st.number_input("批次預測顯示筆數上限", min_value=5, max_value=200, value=50, step=5)
+    st.header("Settings")
+    show_prob = st.checkbox("Show class probabilities", True)
+    batch_limit = st.number_input("Batch prediction display limit", min_value=5, max_value=200, value=50, step=5)
     st.markdown("---")
-    st.subheader("令牌模式")
-    token_scope = st.selectbox("資料範圍", ["全部", "ham", "spam"], index=0)
-    token_ngram = st.slider("n-gram 長度", min_value=1, max_value=2, value=1, step=1)
-    token_topk = st.slider("顯示前 N 個常見令牌", min_value=10, max_value=100, value=30, step=10)
-    top_n_terms = st.slider("Top 權重詞顯示數量", min_value=5, max_value=50, value=20, step=5)
-    show_wordcloud = st.checkbox("顯示詞雲 (WordCloud)", True)
+    st.subheader("Token Patterns")
+    token_scope = st.selectbox("Text scope", ["All", "ham", "spam"], index=0)
+    token_ngram = st.slider("n-gram length", min_value=1, max_value=2, value=1, step=1)
+    token_topk = st.slider("Top N frequent tokens", min_value=10, max_value=100, value=30, step=10)
+    top_n_terms = st.slider("Top feature weight count", min_value=5, max_value=50, value=20, step=5)
+    show_wordcloud = st.checkbox("Show WordCloud", True)
     st.markdown("---")
-    st.subheader("模型效能")
-    spam_threshold = st.slider("Spam 判定閾值", min_value=0.10, max_value=0.90, value=0.50, step=0.05)
+    st.subheader("Model Performance")
+    spam_threshold = st.slider("Spam probability threshold", min_value=0.10, max_value=0.90, value=0.50, step=0.05)
     st.markdown("---")
-    st.markdown("**模型路徑**: ``{}``".format(MODEL_PATH))
+    st.markdown("**Model path**: ``{}``".format(MODEL_PATH))
+    st.markdown("---")
+    st.subheader("Dataset Source")
+    dataset_source = st.radio("Select dataset", ["Default (sms_spam_no_header.csv)", "Upload CSV"], index=0)
+    uploaded_dataset_file = None
+    if dataset_source.startswith("Upload"):
+        uploaded_dataset_file = st.file_uploader("Upload dataset CSV", type=["csv"], key="dataset_uploader")
+    # Decide dataset
+    if dataset_source.startswith("Default"):
+        dataset = default_dataset
+    else:
+        if uploaded_dataset_file is not None:
+            try:
+                # Try read with header; if doesn't contain required columns, fallback
+                uploaded_dataset_file.seek(0)
+                df_tmp = pd.read_csv(uploaded_dataset_file)
+                if set(df_tmp.columns) >= {"label", "text"}:
+                    dataset = df_tmp
+                elif df_tmp.shape[1] >= 2:
+                    uploaded_dataset_file.seek(0)
+                    dataset = pd.read_csv(uploaded_dataset_file, header=None, names=["label", "text"])
+                else:
+                    st.error("Uploaded CSV must have at least 2 columns (label,text).")
+                    dataset = None
+                if dataset is not None:
+                    dataset = dataset.dropna(subset=["text"]).copy()
+                    dataset["text"] = dataset["text"].astype(str)
+                    st.success(f"Loaded uploaded dataset: {len(dataset):,} rows.")
+            except Exception as e:
+                st.error(f"Failed to read uploaded dataset: {e}")
+                dataset = None
+        else:
+            dataset = None
+    if dataset is None and dataset_source.startswith("Upload"):
+        st.info("No uploaded dataset loaded yet.")
+    elif dataset is None:
+        st.info("Dataset unavailable; only prediction features active.")
 
 # 單筆輸入
-st.subheader("單筆訊息預測")
-text = st.text_area("輸入簡訊內容：", height=120, placeholder="例如：Free entry in a weekly cash prize draw")
+st.subheader("Single Message Prediction")
+text = st.text_area("Enter message text:", height=120, placeholder="e.g. Free entry in a weekly cash prize draw")
 col_predict, col_clear = st.columns([1,1])
-if col_predict.button("🔮 預測"):
+if col_predict.button("🔮 Predict"):
     if not text.strip():
-        st.warning("請輸入訊息內容。")
+        st.warning("Please enter message text.")
     else:
         pred = model.predict([text])[0]
         proba = model.predict_proba([text])[0]
@@ -79,19 +115,19 @@ if col_predict.button("🔮 預測"):
         prob_map = dict(zip(classes, proba))
         is_spam = pred.lower() == "spam"
         color = "#d9534f" if is_spam else "#5cb85c"
-        st.markdown(f"<div style='padding:12px;border-radius:6px;background:{color};color:#fff;font-weight:bold;'>分類結果： {pred.upper()}</div>", unsafe_allow_html=True)
+        st.markdown(f"<div style='padding:12px;border-radius:6px;background:{color};color:#fff;font-weight:bold;'>Prediction: {pred.upper()}</div>", unsafe_allow_html=True)
         if show_prob:
             df_prob = pd.DataFrame({"class": classes, "probability": proba}).sort_values("probability", ascending=False)
             st.table(df_prob)
-if col_clear.button("🧹 清除"):
+if col_clear.button("🧹 Clear"):
     st.experimental_set_query_params()  # 简單刷新
 
 st.markdown("---")
 
 # 批次上傳
-st.subheader("批次預測 (CSV 上傳)")
-st.caption("格式：無表頭，第一欄 label(可留空)、第二欄 text。若已有表頭亦可上傳，程式會嘗試辨識。")
-uploaded = st.file_uploader("選擇 CSV 檔", type=["csv"]) 
+st.subheader("Batch Prediction (CSV Upload)")
+st.caption("Format: no header -> first column label (optional), second column text. If header exists the app will detect.")
+uploaded = st.file_uploader("Choose CSV file", type=["csv"]) 
 if uploaded is not None:
     try:
         # 嘗試讀取：先嘗試含表頭，不行則指定欄位
@@ -102,7 +138,7 @@ if uploaded is not None:
             elif df_up.shape[1] >= 2:
                 df_up = pd.read_csv(uploaded, header=None, names=["label", "text"])
             else:
-                st.error("CSV 欄位不足，需至少 2 欄。")
+                st.error("CSV requires at least 2 columns (label,text).")
                 df_up = None
         except Exception:
             uploaded.seek(0)
@@ -123,55 +159,118 @@ if uploaded is not None:
                 for ci, cname in enumerate(classes):
                     df_result[f"prob_{cname}"] = [p[ci] for p in probas]
             st.write(df_result)
-            st.success(f"完成 {len(df_result)} 筆預測。")
+            st.success(f"Completed {len(df_result)} predictions.")
     except Exception as e:
-        st.error(f"讀取或預測時發生錯誤: {e}")
+        st.error(f"Error during batch prediction: {e}")
 
 st.markdown("---")
 
 # 資料集視覺化
-st.subheader("資料探索 / 視覺化")
+st.subheader("Data Exploration / Visualization")
 if dataset is not None:
-    with st.expander("原始資料前 10 筆"):
+    with st.expander("First 10 rows"):
         st.dataframe(dataset.head(10))
 
     st.markdown("---")
 
     # 儀表板分頁
-    tabs = st.tabs(["資料分佈", "令牌模式", "模型效能"])
+    tabs = st.tabs(["Data Overview", "Top Tokens by Class", "Token Patterns", "Model Performance (Full)", "Model Performance (Test)"])
 
-    # 資料分佈
+    # Data Overview
     with tabs[0]:
-        st.subheader("資料分佈")
-        if dataset is not None:
-            with st.expander("原始資料前 10 筆"):
-                st.dataframe(dataset.head(10))
+        st.subheader("Data Overview")
+        if dataset is None:
+            st.info("No dataset loaded.")
+        else:
+            col_stats, col_len = st.columns([1,2])
+            with col_stats:
+                st.markdown("**Basic Stats**")
+                st.metric("Rows", f"{len(dataset):,}")
+                lbl_counts = dataset["label"].value_counts(dropna=False)
+                st.write("Label counts:")
+                st.table(lbl_counts.to_frame("count"))
+                # Length metrics
+                lengths = dataset["text"].str.len()
+                st.metric("Avg Length", f"{lengths.mean():.1f}")
+                st.metric("Median Length", f"{lengths.median():.1f}")
+                st.metric("Max Length", f"{lengths.max():,}")
+                st.metric("Min Length", f"{lengths.min():,}")
+                missing_label = dataset["label"].isna().sum()
+                missing_text = dataset["text"].isna().sum()
+                st.caption(f"Missing label rows: {missing_label}; Missing text rows: {missing_text}")
+                with st.expander("Preview (head 10)"):
+                    st.dataframe(dataset.head(10))
 
-            col_a, col_b = st.columns([1,2])
-            label_counts = dataset["label"].value_counts()
-            col_a.metric("總筆數", f"{len(dataset):,}")
-            col_a.write(label_counts)
-
-            dataset["length"] = dataset["text"].str.len()
-            fig_len, ax_len = plt.subplots(figsize=(6,3))
-            ax_len.hist(dataset["length"], bins=40, color="#4e79a7", alpha=0.7, label="All")
-            # 類別對比直方圖
+            # Length distribution
+            dataset["__length__"] = dataset["text"].str.len()
+            fig_len, ax_len = plt.subplots(figsize=(7,3))
+            ax_len.hist(dataset["__length__"], bins=40, color="#4e79a7", alpha=0.7, label="All")
             try:
-                ax_len.hist(dataset.loc[dataset.label.str.lower()=="ham","length"], bins=40, alpha=0.5, label="ham")
-                ax_len.hist(dataset.loc[dataset.label.str.lower()=="spam","length"], bins=40, alpha=0.5, label="spam")
+                ax_len.hist(dataset.loc[dataset.label.str.lower()=="ham","__length__"], bins=40, alpha=0.5, label="ham")
+                ax_len.hist(dataset.loc[dataset.label.str.lower()=="spam","__length__"], bins=40, alpha=0.5, label="spam")
                 ax_len.legend()
             except Exception:
                 pass
-            ax_len.set_title("訊息長度直方圖")
-            ax_len.set_xlabel("字元數")
-            ax_len.set_ylabel("頻率")
-            col_b.pyplot(fig_len, clear_figure=True)
+            ax_len.set_title("Message Length Histogram")
+            ax_len.set_xlabel("Characters")
+            ax_len.set_ylabel("Frequency")
+            col_len.pyplot(fig_len, clear_figure=True)
+
+    # Top Tokens by Class
+    with tabs[1]:
+        st.subheader("Top Tokens by Class")
+        if dataset is None:
+            st.info("No dataset loaded.")
         else:
-            st.info("資料檔缺失，僅能使用預測功能。")
+            if hasattr(model, "named_steps") and "tfidf" in model.named_steps:
+                vect = model.named_steps["tfidf"]
+                # logistic regression coefficients
+                if "clf" in model.named_steps and hasattr(model.named_steps["clf"], "coef_"):
+                    clf = model.named_steps["clf"]
+                    feature_names = np.array(vect.get_feature_names_out())
+                    coefs = clf.coef_[0]
+                    # Spam positive class assumed -> high positive => spam, negative => ham
+                    spam_top_idx = np.argsort(coefs)[-top_n_terms:][::-1]
+                    ham_top_idx = np.argsort(coefs)[:top_n_terms]
+                    spam_df = pd.DataFrame({"token": feature_names[spam_top_idx], "weight": coefs[spam_top_idx]})
+                    ham_df = pd.DataFrame({"token": feature_names[ham_top_idx], "weight": coefs[ham_top_idx]})
+                    col_spam, col_ham = st.columns(2)
+                    with col_spam:
+                        st.markdown(f"**Top Spam Tokens (N={top_n_terms})**")
+                        st.table(spam_df)
+                    with col_ham:
+                        st.markdown(f"**Top Ham Tokens (N={top_n_terms})**")
+                        st.table(ham_df)
+                    # Combined difference view
+                    diff_df = pd.concat([
+                        spam_df.assign(class_label="spam"),
+                        ham_df.assign(class_label="ham")
+                    ])
+                    with st.expander("Download token weights"):
+                        csv_bytes = diff_df.to_csv(index=False).encode("utf-8-sig")
+                        st.download_button("Download token weights CSV", data=csv_bytes, file_name="token_weights.csv", mime="text/csv")
+                    if show_wordcloud:
+                        try:
+                            st.markdown("**WordClouds**")
+                            spam_tokens = {t: w for t, w in zip(spam_df["token"], spam_df["weight"])}
+                            ham_tokens = {t: abs(w) for t, w in zip(ham_df["token"], ham_df["weight"])}
+                            fig_wc, (ax_spam, ax_ham) = plt.subplots(1,2, figsize=(10,4))
+                            WordCloud(width=600, height=400, background_color="white").generate_from_frequencies(spam_tokens)
+                            ax_spam.imshow(WordCloud(width=600, height=400, background_color="white").generate_from_frequencies(spam_tokens))
+                            ax_spam.axis("off"); ax_spam.set_title("Spam")
+                            ax_ham.imshow(WordCloud(width=600, height=400, background_color="white").generate_from_frequencies(ham_tokens))
+                            ax_ham.axis("off"); ax_ham.set_title("Ham")
+                            st.pyplot(fig_wc, clear_figure=True)
+                        except Exception as e:
+                            st.info(f"WordCloud failed: {e}")
+                else:
+                    st.info("Classifier coefficients unavailable.")
+            else:
+                st.info("Vectorizer not found in pipeline.")
 
     # 令牌模式
-    with tabs[1]:
-        st.subheader("令牌模式（依資料與向量器）")
+    with tabs[2]:
+        st.subheader("Token Patterns (Vectorizer based)")
         try:
             if dataset is not None and hasattr(model, "named_steps") and "tfidf" in model.named_steps:
                 vect = model.named_steps["tfidf"]
@@ -192,23 +291,23 @@ if dataset is not None:
                             counter[tok] += 1
                 common = counter.most_common(token_topk)
                 df_tok = pd.DataFrame(common, columns=["token", "count"])
-                st.caption(f"Top {token_topk} 令牌（n={token_ngram}, 範圍={token_scope}）")
+                st.caption(f"Top {token_topk} tokens (n={token_ngram}, scope={token_scope})")
                 st.table(df_tok)
                 # 可選：點選一個 token 顯示範例句
                 if len(df_tok):
-                    picked = st.selectbox("查看包含此令牌的範例句：", ["(不選)"] + df_tok["token"].head(20).tolist())
-                    if picked and picked != "(不選)":
+                    picked = st.selectbox("Show sample sentences containing token:", ["(None)"] + df_tok["token"].head(20).tolist())
+                    if picked and picked != "(None)":
                         examples = [s for s in texts if picked in s][:5]
                         for ex in examples:
                             st.write("• ", ex)
             else:
-                st.info("缺少資料或向量器，無法顯示令牌模式。")
+                st.info("Missing dataset or vectorizer; cannot show token patterns.")
         except Exception as e:
-            st.info(f"令牌模式計算失敗：{e}")
+            st.info(f"Token pattern computation failed: {e}")
 
-    # 模型效能
-    with tabs[2]:
-        st.subheader("模型效能（整份資料集重跑推論）")
+    # 模型效能 (Full Dataset)
+    with tabs[3]:
+        st.subheader("Model Performance (Full Dataset Inference)")
         try:
             if dataset is not None:
                 y_true = dataset["label"].astype(str)
@@ -251,7 +350,7 @@ if dataset is not None:
                 ax_cm.set_xlabel("Predicted"); ax_cm.set_ylabel("Actual")
                 for (i,j), v in np.ndenumerate(cm):
                     ax_cm.text(j, i, str(v), ha="center", va="center", color="black")
-                ax_cm.set_title(f"Confusion Matrix (thresh={spam_threshold:.2f})")
+                ax_cm.set_title(f"Confusion Matrix (threshold={spam_threshold:.2f})")
                 st.pyplot(fig_cm, clear_figure=True)
 
                 # ROC（與閾值無關）
@@ -264,36 +363,88 @@ if dataset is not None:
                     ax_roc.plot([0,1],[0,1], linestyle="--", color="gray")
                     ax_roc.set_xlabel("FPR")
                     ax_roc.set_ylabel("TPR")
-                    ax_roc.set_title("ROC Curve (spam as positive)")
+                    ax_roc.set_title("ROC Curve (spam positive class)")
                     ax_roc.legend(loc="lower right")
                     st.pyplot(fig_roc, clear_figure=True)
 
                 # 匯出
-                st.markdown("### 匯出預測結果")
+                st.markdown("### Export Predictions")
                 full_df = dataset.copy()
                 full_df["pred"] = y_pred_thr
                 if spam_scores is not None:
                     full_df["spam_prob"] = spam_scores
                 csv_bytes = full_df.to_csv(index=False).encode("utf-8-sig")
-                st.download_button("下載完整預測結果 CSV", data=csv_bytes, file_name="spam_predictions.csv", mime="text/csv")
+                st.download_button("Download full predictions CSV", data=csv_bytes, file_name="spam_predictions.csv", mime="text/csv")
             else:
-                st.info("資料檔缺失，無法計算效能。")
+                st.info("Dataset missing; performance metrics not available.")
         except Exception as e:
-            st.info(f"效能計算失敗：{e}")
+            st.info(f"Performance calculation failed: {e}")
+
+    # Model Performance (Test)
+    with tabs[4]:
+        st.subheader("Model Performance (Test)")
+        metrics_path = os.path.join("models", "test_metrics.csv")
+        meta_path = os.path.join("models", "model_meta.json")
+        cm_path = os.path.join("models", "test_confusion_matrix.json")
+        if os.path.exists(metrics_path):
+            try:
+                df_test_metrics = pd.read_csv(metrics_path)
+                st.caption("Loaded test set metrics produced during training.")
+                st.dataframe(df_test_metrics)
+                # Optional: summary cards
+                try:
+                    acc_row = df_test_metrics[df_test_metrics["label"]=="accuracy"].iloc[0]
+                    col1, col2, col3 = st.columns(3)
+                    col1.metric("Accuracy", f"{acc_row['precision']:.4f}")
+                    if os.path.exists(meta_path):
+                        import json as _json
+                        meta = _json.load(open(meta_path, "r", encoding="utf-8"))
+                        col2.metric("Features", str(meta.get("vectorizer",{}).get("feature_count")))
+                        col3.metric("Algorithm", meta.get("algorithm","-"))
+                except Exception:
+                    pass
+                # Confusion matrix (test)
+                if os.path.exists(cm_path):
+                    try:
+                        import json as _json
+                        cm_obj = _json.load(open(cm_path, "r", encoding="utf-8"))
+                        classes = cm_obj.get("classes", [])
+                        cm = np.array(cm_obj.get("matrix", []))
+                        if cm.size:
+                            fig_cm_t, ax_cm_t = plt.subplots(figsize=(4,3))
+                            im = ax_cm_t.imshow(cm, cmap="Purples")
+                            ax_cm_t.set_xticks(range(len(classes))); ax_cm_t.set_xticklabels(classes)
+                            ax_cm_t.set_yticks(range(len(classes))); ax_cm_t.set_yticklabels(classes)
+                            ax_cm_t.set_xlabel("Predicted"); ax_cm_t.set_ylabel("Actual")
+                            for (i,j), v in np.ndenumerate(cm):
+                                ax_cm_t.text(j, i, str(v), ha="center", va="center", color="black")
+                            ax_cm_t.set_title("Test Confusion Matrix")
+                            st.pyplot(fig_cm_t, clear_figure=True)
+                    except Exception as e:
+                        st.info(f"Unable to show test confusion matrix: {e}")
+            except Exception as e:
+                st.error(f"Failed to load test metrics: {e}")
+        else:
+            st.info("Test metrics file not found. Re-run training to generate.")
 
 # 說明區塊
 st.markdown("---")
-with st.expander("說明 / Help"):
+with st.expander("Help / Guide"):
     st.markdown(
         """
-        **使用說明**
-        - 單筆輸入區輸入訊息後按下『預測』。
-        - 批次上傳支援 CSV，前兩欄視為 label 與 text；label 可為空用於推論。
-        - 若尚未訓練模型，請先在專案根目錄執行：`python .\\spam_classifier\\train.py`。
+        **Usage**
+        - Enter a single message and press 'Predict'.
+        - Upload a CSV for batch prediction (columns: label,text). Label can be blank.
+        - If model is missing run `python .\\spam_classifier\\train.py`.
 
-        **改進建議**
-        - 可增加資料清理（URL、表情符號正規化）。
-        - 可替換模型為 SVC、Naive Bayes 或深度學習。
-        - 可加入混淆矩陣與 ROC 曲線視覺化。
+        **Dashboard Tabs**
+        - Data Distribution: counts and length histogram.
+        - Token Patterns: frequent tokens by scope and n-gram, plus feature weight ranking & word clouds.
+        - Model Performance: metrics, confusion matrix, ROC and export.
+
+        **Possible Improvements**
+        - Add text cleaning (URLs, emojis, numbers normalization).
+        - Try alternative models (SVC, Naive Bayes, deep learning).
+        - Add training versioning & incremental retraining.
         """
     )
