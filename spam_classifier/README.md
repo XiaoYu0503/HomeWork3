@@ -45,6 +45,14 @@ python .\spam_classifier\predict.py
 streamlit run .\spam_classifier\streamlit_app.py
 ```
 
+### 頁面功能（已內建）
+- 單筆與批次預測（CSV 上傳）
+- 標籤分佈與訊息長度統計＋直方圖
+- 依模型權重的關鍵詞排行（Spam/Ham 各自 Top N，可於側邊調整數量）
+- 詞雲（WordCloud）：Spam 與 Ham 各一張
+- 評估圖表：混淆矩陣、ROC Curve（spam 為正類）
+- 下載整體資料集的預測結果 CSV
+
 ## 部署到 Streamlit Cloud（streamlit.app）
 1. 將此專案推到 GitHub（請包含 `models/spam_model.joblib` 與 `requirements.txt`）。
 2. 登入 https://streamlit.io/ → Deploy an app → 連結你的 GitHub 儲存庫。
